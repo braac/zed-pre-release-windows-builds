@@ -1,7 +1,7 @@
 name: Build Zed Pre-Release
 on:
   schedule:
-    - cron: "*/20 * * * *" # Check every 5 minutes
+    - cron: "*/20 * * * *" # Check every 20 minutes
   workflow_dispatch:
   pull_request:
 
