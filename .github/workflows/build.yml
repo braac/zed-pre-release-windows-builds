@@ -1,13 +1,71 @@
-name: Build Zed Nightly
-
+name: Build Zed Pre-Release
 on:
   schedule:
-    - cron: "0 0 * * *" # Runs every night at midnight UTC
+    - cron: "*/20 * * * *" # Check every 5 minutes
   workflow_dispatch:
   pull_request:
 
 jobs:
+  check-for-new-prerelease:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.check-release.outputs.should_build }}
+      version: ${{ steps.check-release.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        
+      - name: Check for new Zed pre-release
+        id: check-release
+        run: |
+          # Fetch all Zed releases including pre-releases
+          RELEASES=$(curl -s "https://api.github.com/repos/zed-industries/zed/releases")
+          
+          # Find the most recent pre-release
+          LATEST_PRERELEASE=$(echo "$RELEASES" | jq -r '[.[] | select(.prerelease==true)] | sort_by(.published_at) | reverse | .[0]')
+          
+          if [ "$LATEST_PRERELEASE" = "null" ]; then
+            echo "No pre-releases found"
+            echo "should_build=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          LATEST_TAG=$(echo "$LATEST_PRERELEASE" | jq -r .tag_name)
+          LATEST_DATE=$(echo "$LATEST_PRERELEASE" | jq -r .published_at)
+          echo "Latest pre-release: $LATEST_TAG published at $LATEST_DATE"
+          
+          # Create version tracking directory if it doesn't exist
+          mkdir -p .github/version-tracker
+          VERSION_FILE=.github/version-tracker/last_prerelease.txt
+          
+          # Check if we've already processed this version
+          if [ -f "$VERSION_FILE" ]; then
+            LAST_PROCESSED=$(cat "$VERSION_FILE")
+            echo "Last processed version: $LAST_PROCESSED"
+            
+            if [ "$LATEST_TAG" = "$LAST_PROCESSED" ]; then
+              echo "No new pre-release detected"
+              echo "should_build=false" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+          fi
+          
+          # We have a new pre-release to build
+          echo "New pre-release detected: $LATEST_TAG"
+          echo "$LATEST_TAG" > "$VERSION_FILE"
+          echo "should_build=true" >> $GITHUB_OUTPUT
+          echo "version=$LATEST_TAG" >> $GITHUB_OUTPUT
+          
+          # Commit the updated version file
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add "$VERSION_FILE"
+          git commit -m "Update last processed Zed pre-release to $LATEST_TAG" || echo "No changes to commit"
+          git push || echo "Failed to push changes"
+
   build:
+    needs: check-for-new-prerelease
+    if: needs.check-for-new-prerelease.outputs.should_build == 'true' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
     runs-on: windows-latest
     strategy:
       matrix:
@@ -19,53 +77,43 @@ jobs:
           - backend: opengl
             artifact_name: zed-release-opengl
             rustflags: "--cfg gles"
-
     steps:
       - name: Enable long paths in Git
         run: |
           git config --system core.longpaths true
-
       - name: Enable long paths in Windows
         shell: powershell
         run: |
           New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" `
             -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force
-
       - name: Install PSToml module
         shell: pwsh
         run: Install-Module -Name PSToml -Scope CurrentUser -Force
-
       - name: Checkout self
         uses: actions/checkout@v4
-
       - name: Checkout Zed
         uses: actions/checkout@v4
         with:
           repository: zed-industries/zed
-          ref: main
+          ref: ${{ needs.check-for-new-prerelease.outputs.version || 'main' }}
           path: zed
-
       - name: Install rust nightly
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: nightly
           override: true
           target: wasm32-wasip1
-
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.backend }}
           workspaces: "zed -> target"
-
       - name: Setup rustflags
         shell: pwsh
         run: ./Parse-Rustflags.ps1 ${{ matrix.rustflags }}
-
       - name: Build release
         working-directory: zed
         run: cargo build --release
-
       - name: Archive build
         uses: actions/upload-artifact@v4
         with:
@@ -73,37 +121,36 @@ jobs:
           path: zed/target/release/zed.exe
 
   release:
-    needs: build
+    needs: [check-for-new-prerelease, build]
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
+    if: needs.check-for-new-prerelease.outputs.should_build == 'true' && github.ref == 'refs/heads/main'
     permissions:
       contents: write
-
     steps:
       - name: Download release artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-
-      - name: Get the current date
-        id: date
-        run: echo "CURRENT_DATE=$(date +'%Y%m%d')" >> $GITHUB_ENV
-
+      - name: Get release version
+        id: version
+        run: |
+          VERSION="${{ needs.check-for-new-prerelease.outputs.version }}"
+          VERSION="${VERSION#v}"  # Remove leading 'v' if present
+          echo "RELEASE_VERSION=$VERSION" >> $GITHUB_ENV
       - name: Create release directories and zip
         run: |
           mkdir -p zed-release zed-release-opengl
           mv artifacts/zed-release/zed.exe zed-release/
           mv artifacts/zed-release-opengl/zed.exe zed-release-opengl/
-          zip -r zed-windows.zip zed-release/*
-          zip -r zed-windows-opengl.zip zed-release-opengl/*
-
+          zip -r zed-windows-${{ env.RELEASE_VERSION }}.zip zed-release/*
+          zip -r zed-windows-opengl-${{ env.RELEASE_VERSION }}.zip zed-release-opengl/*
       - name: Upload release build artifacts to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: ${{ env.CURRENT_DATE }}
-          tag_name: ${{ env.CURRENT_DATE }}
+          name: Zed ${{ env.RELEASE_VERSION }}
+          tag_name: build-${{ env.RELEASE_VERSION }}
           draft: false
           make_latest: true
           files: |
-            zed-windows.zip
-            zed-windows-opengl.zip
+            zed-windows-${{ env.RELEASE_VERSION }}.zip
+            zed-windows-opengl-${{ env.RELEASE_VERSION }}.zip
