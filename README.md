@@ -24,6 +24,6 @@ scoop install vcredist2022
 
 ## Is it safe?
 
-This repository contains a [simple GitHub workflow](./.github/workflows/build.yml) that builds a windows executable from Zed [pre-release](https://github.com/zed-industries/zed/releases?q=pre&expanded=true) source codes.
+This repository contains a [simple GitHub workflow](./.github/workflows/build.yml) that builds a windows executable from Zed [pre-release](https://github.com/zed-industries/zed/releases?q=pre&expanded=true) source codes. The workflow is scheduled to check for pre-releases every 20 minutes and takes approximately 1 hour to build the release.
 
 See the [Zed homepage](https://zed.dev/) or [official repository](https://github.com/zed-industries/zed) for more details.
