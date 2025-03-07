@@ -101,8 +101,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: nightly
-          override: true
-          target: wasm32-wasip1
+          targets: wasm32-wasip1
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
