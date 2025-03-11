@@ -101,7 +101,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: nightly
-          targets: wasm32-wasip1
+          override: true
+          target: wasm32-wasip1
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
@@ -110,6 +111,60 @@ jobs:
       - name: Setup rustflags
         shell: pwsh
         run: ./Parse-Rustflags.ps1 ${{ matrix.rustflags }}
+      # New step: Setup Abseil dependencies
+      - name: Setup Abseil dependencies for WebRTC
+        shell: pwsh
+        run: |
+          # First try cargo build to generate directories (may fail but we need directory structure)
+          try {
+            Push-Location zed
+            cargo build --release --lib --package webrtc-sys --no-default-features
+            Pop-Location
+          } catch {
+            Write-Host "Initial build failed, but this is expected. Continuing..."
+          }
+          
+          # Find the WebRTC build directory dynamically
+          $WebRTCBuildDir = Get-ChildItem -Path zed/target/release/build -Recurse -Directory -Filter "*webrtc*" | 
+                           Where-Object { $_.FullName -match "livekit_webrtc" } | 
+                           Select-Object -First 1 -ExpandProperty FullName
+          
+          if (-not $WebRTCBuildDir) {
+            Write-Host "WebRTC build directory not found. Creating basic structure..."
+            $WebRTCBuildDir = "zed/target/release/build/webrtc-temp"
+            New-Item -ItemType Directory -Force -Path "$WebRTCBuildDir/include/third_party/abseil-cpp/absl"
+          }
+          
+          $AbseilDir = "$WebRTCBuildDir/include/third_party/abseil-cpp"
+          Write-Host "Using Abseil directory: $AbseilDir"
+          
+          # Download and extract abseil
+          $AbseilVersion = "20230125.3"
+          Write-Host "Downloading Abseil $AbseilVersion"
+          Invoke-WebRequest -Uri "https://github.com/abseil/abseil-cpp/archive/refs/tags/$AbseilVersion.zip" -OutFile "abseil.zip"
+          Expand-Archive -Path "abseil.zip" -DestinationPath "temp_abseil" -Force
+          
+          # Create the necessary internal directories
+          foreach ($dir in @("base/internal", "container/internal", "functional/internal", "time/internal", "strings/internal", "types/internal", "utility/internal", "meta/internal")) {
+            $targetDir = "$AbseilDir/absl/$dir"
+            if (!(Test-Path $targetDir)) {
+              Write-Host "Creating directory: $targetDir"
+              New-Item -ItemType Directory -Path $targetDir -Force
+            }
+          }
+          
+          # Copy all relevant header files to ensure complete coverage
+          $abslDirs = Get-ChildItem -Path "temp_abseil/abseil-cpp-$AbseilVersion/absl" -Directory
+          foreach ($srcDir in $abslDirs) {
+            $dirName = $srcDir.Name
+            Copy-Item -Path $srcDir.FullName -Destination "$AbseilDir/absl" -Recurse -Force
+            Write-Host "Copied $dirName headers"
+          }
+          
+          # Also copy the abseil config headers at root level
+          Copy-Item -Path "temp_abseil/abseil-cpp-$AbseilVersion/absl/*.h" -Destination "$AbseilDir/absl/" -Force
+          
+          Write-Host "Abseil headers setup complete"
       - name: Build release
         working-directory: zed
         run: cargo build --release
